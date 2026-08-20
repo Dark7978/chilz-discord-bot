@@ -92,7 +92,11 @@ const CATEGORIES = [
     /darmowe\s*(skiny|klucze)/, /oferta\s*wymiany/, /zaloguj\s*sie\s*przez\s*steam/,
   ]},
   { name: 'malware-game', weight: 4, patterns: [
-    /(try|test|play|check\s*out)\s*(out\s*)?my\s*(new\s*)?game/, /playtest|beta\s*test/, /game\s*i\s*(made|created|developed)/,
+    /(try|test|play|check\s*out)\s*(out\s*)?my\s*(new\s*)?game/, /game\s*i\s*(made|created|developed)/,
+    // The scam is always an individual pushing their own build, while a server
+    // announcing "our beta testers" is not, so the possessive has to be there.
+    /(playtest|beta\s*test\w*)\s*(for|of|on)?\s*\bmy\b/, /\bmy\s*(game'?s?\s*)?(playtest|beta\s*test)/,
+    /beta\s*test\w*.{0,25}\b(moja|mojej|moje)\b/, /\b(moja|mojej)\s*gr[aey].{0,25}beta/,
     /can\s*you\s*(test|try)\s*(my|this)/, /feedback\s*on\s*my\s*game/, /(download|install).{0,15}(dropbox|drive\.google|mediafire|mega\.nz|\.zip|\.rar|\.exe)/,
     /beta\s*(access|key|invite)/, /help\s*me\s*test/,
     /(sprawdz|przetestuj|zagraj\s*w)\s*(moja|moje|nowa)\s*(gre|gra|gierk)/,
