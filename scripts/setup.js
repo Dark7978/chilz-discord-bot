@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
+const { execFileSync } = require('child_process');
 
 const root = path.join(__dirname, '..');
 const envExample = path.join(root, '.env.example');
@@ -35,6 +36,31 @@ function download(from, to) {
   });
 }
 
+// The ffmpeg-static package ships a Linux binary that segfaults as soon as it
+// opens an HTTPS input, so fetch a real build. The Windows one is fine.
+async function installFfmpeg() {
+  if (isWin || process.arch !== 'x64') return;
+
+  const ffbuild = path.join(root, 'ffbuild');
+  if (fs.existsSync(path.join(ffbuild, 'bin', 'ffmpeg'))) {
+    console.log('FFmpeg build is already in the project folder.');
+    return;
+  }
+
+  const archive = path.join(root, 'ffmpeg.tar.xz');
+  try {
+    console.log('Downloading FFmpeg (~123 MB, for reliable streaming)...');
+    await download('https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz', archive);
+    fs.mkdirSync(ffbuild, { recursive: true });
+    execFileSync('tar', ['-xf', archive, '-C', ffbuild, '--strip-components=1']);
+    console.log('Saved ffbuild/bin/ffmpeg');
+  } catch (err) {
+    console.warn(`Could not install FFmpeg (${err.message}) — falling back to the bundled one.`);
+  } finally {
+    fs.rmSync(archive, { force: true });
+  }
+}
+
 async function main() {
   if (!fs.existsSync(envFile) && fs.existsSync(envExample)) {
     fs.copyFileSync(envExample, envFile);
@@ -51,6 +77,8 @@ async function main() {
     if (!isWin) fs.chmodSync(dest, 0o755);
     console.log('Saved', path.basename(dest));
   }
+
+  await installFfmpeg();
 
   console.log('\nNext:');
   console.log('  1. Put DISCORD_TOKEN in .env');

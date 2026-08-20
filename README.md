@@ -60,6 +60,8 @@ AutoMod ladder: delete + warn → kick → 24-hour temp ban. No automatic perman
 - Spotify credentials are only used to read track/album/playlist names. Audio comes from YouTube or SoundCloud through yt-dlp → FFmpeg.
 - YouTube blocks most datacenter IPs with "Sign in to confirm you're not a bot". If that happens the bot falls back to SoundCloud automatically, so music still plays on a VPS with no extra setup. Home connections normally get YouTube directly.
 - To use YouTube from a blocked host anyway, put a Netscape-format `youtube.cookies.txt` next to `bot.js` (or point `YTDLP_COOKIES` at one). It is picked up automatically and is never committed.
+- FFmpeg cannot open a YouTube or SoundCloud page URL on its own — it has no extractor for either, so a watch page just looks like HTML to it. yt-dlp turns the page into a real stream URL and FFmpeg takes it from there. That is why both are needed.
+- On Linux `npm run setup` downloads a full FFmpeg build into `ffbuild/`, because the `ffmpeg-static` package ships a Linux binary that segfaults as soon as it opens an HTTPS input. Set `FFMPEG_PATH` to use your own build instead.
 - Keep `yt-dlp` updated if playback breaks (`yt-dlp -U` or re-run `npm run setup` after deleting the binary).
 
 ## AI support

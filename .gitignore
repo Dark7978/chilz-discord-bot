@@ -6,6 +6,7 @@ aiSupportData.json
 *.log
 yt-dlp.exe
 yt-dlp
+ffbuild/
 .remember/
 .claude/
 bridge-server.js

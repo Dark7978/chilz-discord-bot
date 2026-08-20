@@ -1,5 +1,6 @@
 'use strict';
 
+const fs      = require('fs');
 const path    = require('path');
 const { execFile, spawn } = require('child_process');
 const { promisify } = require('util');
@@ -18,7 +19,19 @@ const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('
 
 // yt-dlp binary — same directory as the bot
 const YTDLP = path.join(__dirname, process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp');
-const FFMPEG = require('ffmpeg-static');
+
+// ffmpeg-static's Linux binary segfaults the moment it opens an HTTPS input, so
+// prefer a real build when one is on disk. scripts/setup.js fetches it.
+function resolveFfmpeg() {
+  const bundled = path.join(__dirname, 'ffbuild', 'bin',
+    process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg');
+  for (const candidate of [process.env.FFMPEG_PATH, bundled]) {
+    if (candidate && fs.existsSync(candidate)) return candidate;
+  }
+  return require('ffmpeg-static');
+}
+const FFMPEG = resolveFfmpeg();
+console.log(`[Music] FFmpeg: ${FFMPEG}`);
 
 // Per-guild queues: guildId → queue object
 const queues = new Map();
