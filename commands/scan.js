@@ -99,6 +99,11 @@ module.exports = {
 
         for (const message of batch.values()) {
           if (message.author?.bot) continue;
+          // The live filter never touches staff, and their announcements read
+          // exactly like promos — @everyone plus a link — so a sweep that
+          // skipped this check would delete the server's own posts.
+          const author = message.member || interaction.guild.members.cache.get(message.author?.id);
+          if (author && isStaffMember(author, settings)) continue;
           scanned++;
 
           const images = [...message.attachments.values()]
