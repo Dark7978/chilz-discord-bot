@@ -6,21 +6,21 @@ const music = require('../musicManager');
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('music')
-    .setDescription('🎵 Music player — YouTube, Spotify metadata, Deezer, playlists')
+    .setDescription('🎵 Music player — YouTube, SoundCloud, Spotify metadata, Deezer, playlists')
     // ── play ────────────────────────────────────────────────────────────────
     .addSubcommand(s => s
       .setName('play')
-      .setDescription('Play a song — search by name, YouTube, Spotify, or Deezer')
+      .setDescription('Play a song — search by name, YouTube, SoundCloud, Spotify, or Deezer')
       .addStringOption(o => o
         .setName('query')
-        .setDescription('Song name, YouTube URL, Spotify link, or Deezer link')
+        .setDescription('Song name, YouTube URL, SoundCloud link, Spotify link, or Deezer link')
         .setRequired(true)
       )
     )
     // ── search ──────────────────────────────────────────────────────────────
     .addSubcommand(s => s
       .setName('search')
-      .setDescription('Search YouTube and see the top 5 results')
+      .setDescription('Search for a song and see the top 5 results')
       .addStringOption(o => o.setName('query').setDescription('Search query').setRequired(true))
     )
     // ── skip ────────────────────────────────────────────────────────────────
@@ -106,23 +106,11 @@ module.exports = {
               .setFooter({ text: `${queue.songs.length} total in queue` })],
           });
         } else {
-          // ── Single song: queued vs. starting ──────────────────────────
-          if (!wasEmpty && queue.playing) {
-            await interaction.editReply({
-              embeds: [new EmbedBuilder()
-                .setColor('#1DB954')
-                .setTitle('✅ Added to Queue')
-                .setDescription(`**[${songs[0].title}](${songs[0].url})**`)
-                .setThumbnail(songs[0].thumbnail || null)
-                .addFields(
-                  { name: 'Duration', value: music.fmt(songs[0].duration), inline: true },
-                  { name: 'Position', value: `#${queue.songs.length}`,     inline: true },
-                  { name: 'Source',   value: songs[0].source || 'YouTube', inline: true },
-                )],
-            });
-          } else {
-            await interaction.editReply({ content: '▶️ Starting playback…' });
-          }
+          // ── Single song: queued vs. starting, with a version picker ────
+          await interaction.editReply({
+            embeds:     [music.buildPickEmbed(songs[0], queue)],
+            components: music.buildAltControls(songs[0]),
+          });
         }
 
         // ── Begin playing if queue was empty ──────────────────────────────
@@ -155,7 +143,7 @@ module.exports = {
         await interaction.editReply({
           embeds: [new EmbedBuilder()
             .setColor('#FF5500')
-            .setTitle(`🔍 YouTube results for "${query}"`)
+            .setTitle(`🔍 Results for "${query}"`)
             .setDescription(lines.join('\n') + '\n\n*Copy a URL above and use `/music play <url>` to play it!*')],
         });
       } catch (err) {

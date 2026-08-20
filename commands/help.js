@@ -52,8 +52,8 @@ module.exports = {
         {
           name: '🎵 Music (must be in a voice channel)',
           value: [
-            '`/music play <query>` — Search by name, YouTube URL, Spotify track/album/playlist, or Deezer link',
-            '`/music search <query>` — See top 5 YouTube results before picking',
+            '`/music play <query>` — Search by name, YouTube URL, SoundCloud link, Spotify track/album/playlist, or Deezer link',
+            '`/music search <query>` — See top 5 results before picking',
             '`/music skip` — Skip the current song',
             '`/music pause` / `/music resume` — Pause / resume',
             '`/music stop` — Stop and clear queue',

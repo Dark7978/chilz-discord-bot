@@ -26,12 +26,41 @@ const queues = new Map();
 // ── Format seconds → m:ss / h:mm:ss ──────────────────────────────────────────
 function fmt(sec) {
   if (!sec || sec === Infinity) return '🔴 LIVE';
+  sec = Math.round(sec);
   const h = Math.floor(sec / 3600);
   const m = Math.floor((sec % 3600) / 60);
   const s = sec % 60;
   return h > 0
     ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`
     : `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function cookieFile() {
+  const fromEnv = process.env.YTDLP_COOKIES;
+  const fallback = path.join(__dirname, 'youtube.cookies.txt');
+  if (fromEnv && require('fs').existsSync(fromEnv)) return fromEnv;
+  if (require('fs').existsSync(fallback)) return fallback;
+  return null;
+}
+
+function isYoutubeTarget(target) {
+  return !target || /youtube\.com|youtu\.be|^ytsearch/i.test(target);
+}
+
+function ytdlpFlags(target = '') {
+  const args = ['--no-warnings'];
+  if (!isYoutubeTarget(target)) return args;
+  args.push('--extractor-args', 'youtube:player_client=web');
+  if (process.platform !== 'win32') args.push('--js-runtimes', 'deno');
+  const cookies = cookieFile();
+  if (cookies) args.push('--cookies', cookies);
+  return args;
+}
+
+function audioFormatFor(target) {
+  return isYoutubeTarget(target)
+    ? '18/bestaudio[protocol=https]/best[protocol=https]/bestaudio/best'
+    : 'bestaudio/best';
 }
 
 function songFromYtdlp(info, source = 'YouTube') {
@@ -47,51 +76,253 @@ function songFromYtdlp(info, source = 'YouTube') {
   };
 }
 
-async function youtubeSearch(query, limit = 1) {
-  console.log(`[Music] YouTube search limit=${limit} query="${query}"`);
-  const { stdout } = await execFileAsync(YTDLP, [
-    `ytsearch${limit}:${query}`,
-    '--dump-json',
-    '--flat-playlist',
-    '--no-warnings',
-    '--no-playlist',
-  ], { maxBuffer: 10 * 1024 * 1024 });
+// YouTube refuses datacenter IPs. Remember a refusal so every later search
+// doesn't pay for a doomed request first.
+const YT_BLOCK_TTL = 10 * 60 * 1000;
+let ytBlockedUntil = 0;
 
+function isYoutubeBlock(err) {
+  if (err?.youtubeBlocked) return true;
+  const text = `${err?.message || ''} ${err?.stderr || ''}`;
+  return /sign in to confirm|not a bot|requires login|login_required|use --cookies/i.test(text);
+}
+
+function youtubeBlocked() {
+  return Date.now() < ytBlockedUntil;
+}
+
+function wrapYtdlpError(err) {
+  if (isYoutubeBlock(err)) {
+    ytBlockedUntil = Date.now() + YT_BLOCK_TTL;
+    console.warn('[Music] YouTube refused this host — using SoundCloud instead.');
+    const blocked = new Error('YouTube is refusing requests from this host.');
+    blocked.youtubeBlocked = true;
+    return blocked;
+  }
+  return err;
+}
+
+function parseYtdlpJson(stdout, source) {
   return stdout.trim().split('\n')
-    .filter(l => l.trim())
+    .filter(l => l.trim().startsWith('{'))
     .map(line => {
-      try { return songFromYtdlp(JSON.parse(line), 'YouTube'); }
+      try { return songFromYtdlp(JSON.parse(line), source); }
       catch { return null; }
     })
     .filter(Boolean);
+}
+
+async function youtubeSearch(query, limit = 1) {
+  const target = `ytsearch${limit}:${query}`;
+  console.log(`[Music] YouTube search limit=${limit} query="${query}"`);
+  try {
+    const { stdout } = await execFileAsync(YTDLP, [
+      target,
+      '--dump-json',
+      '--flat-playlist',
+      '--no-playlist',
+      ...ytdlpFlags(target),
+    ], { maxBuffer: 10 * 1024 * 1024 });
+
+    return parseYtdlpJson(stdout, 'YouTube');
+  } catch (err) {
+    throw wrapYtdlpError(err);
+  }
+}
+
+// Label uploads on SoundCloud are 30-second previews; anything this short is
+// almost certainly one of those rather than the real track.
+const SC_MIN_SECONDS = 40;
+
+// SoundCloud is mostly reuploads, so searching for a well known song returns a
+// wall of remixes, bootlegs and hour-long mixes. Rank them so the version that
+// actually resembles the requested track wins.
+const VARIANT_RE = /\b(remix|bootleg|edit|flip|mashup|nightcore|sped ?up|slowed|reverb|cover|karaoke|instrumental|acapella|parody|tribute|remake|refix|rework|vip|hardstyle|techno|dubstep|uptempo|afro ?house|live|mix|8d)\b/i;
+const TITLE_NOISE_RE = /\b(official|video|audio|lyrics?|hd|4k|full|remastered|free ?download|ft|feat|the|and|a)\b/g;
+
+function titleTokens(text) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(TITLE_NOISE_RE, ' ')
+    .split(' ')
+    .filter(t => t.length > 1);
+}
+
+function looksLikeVariant(song) {
+  return VARIANT_RE.test(song?.title || '');
+}
+
+function rankCandidates(songs, query, reference) {
+  const wanted = titleTokens(reference.name || query);
+  const queryIsVariant = VARIANT_RE.test(query);
+  const target = reference.duration || 0;
+
+  return songs
+    .map((s, i) => {
+      const have = new Set(titleTokens(s.title));
+      const hit  = wanted.filter(t => have.has(t) || titleTokens(s.author).includes(t)).length;
+      let score  = wanted.length ? (hit / wanted.length) * 100 : 50;
+
+      // Unless the request asked for a remix, treat one as the wrong track.
+      if (!queryIsVariant && looksLikeVariant(s)) score -= 45;
+
+      if (target && s.duration) {
+        const off = Math.abs(s.duration - target) / target;
+        score -= Math.min(off, 1) * 60;
+      }
+
+      // Words in the title that the real track doesn't have are usually remixer
+      // credits or mashup partners. Small nudge only — never enough to beat a
+      // genuine title match.
+      const extra = [...have].filter(t => !wanted.includes(t)).length;
+      score -= Math.min(extra, 8);
+
+      return { s, i, score };
+    })
+    .sort((a, b) => b.score - a.score || a.i - b.i)
+    .map(x => x.s);
+}
+
+// Deezer's search is free, keyless, and reachable from hosts YouTube blocks. It
+// gives the canonical artist, title and length to score candidates against, so
+// remixes and "full album" uploads stop winning.
+async function referenceTrack(query) {
+  try {
+    const res = await fetch(`https://api.deezer.com/search?limit=1&q=${encodeURIComponent(query)}`);
+    if (!res.ok) return {};
+    const t = (await res.json()).data?.[0];
+    if (!t) return {};
+    return { name: `${t.artist?.name || ''} ${t.title_short || t.title || ''}`.trim(), duration: t.duration || 0 };
+  } catch {
+    return {};
+  }
+}
+
+async function soundcloudSearch(query, limit = 1, targetSeconds = 0) {
+  const want = Math.min(Math.max(limit * 5, 5), 25);
+  console.log(`[Music] SoundCloud search limit=${limit} query="${query}"`);
+  const args = [
+    `scsearch${want}:${query}`,
+    '--dump-json',
+    '--no-playlist',
+    '--no-warnings',
+    '--ignore-errors',
+  ];
+  let stdout = '';
+  try {
+    ({ stdout } = await execFileAsync(YTDLP, args, { maxBuffer: 20 * 1024 * 1024 }));
+  } catch (err) {
+    // DRM'd or region-locked entries make yt-dlp exit non-zero even though the
+    // rest of the results came through fine.
+    if (!err.stdout?.trim()) throw err;
+    stdout = err.stdout;
+  }
+  const songs = parseYtdlpJson(stdout, 'SoundCloud');
+  const full  = songs.filter(s => !s.duration || s.duration >= SC_MIN_SECONDS);
+  const reference = await referenceTrack(query);
+  if (targetSeconds) reference.duration = targetSeconds;
+  return rankCandidates(full.length ? full : songs, query, reference);
+}
+
+// Attach the runner-up versions so a bad match is one click from being fixed.
+function withAlternatives(ranked, limit) {
+  if (limit !== 1 || !ranked.length) return ranked.slice(0, limit);
+  const [best, ...rest] = ranked;
+  return [{
+    ...best,
+    variant: looksLikeVariant(best),
+    alternatives: rest.slice(0, 3),
+  }];
+}
+
+// Swap the playing track for one of the alternatives offered when it was queued.
+async function playAlternative(guildId, index) {
+  const queue = queues.get(guildId);
+  const current = queue?.songs[0];
+  const pick = current?.alternatives?.[index];
+  if (!pick) return null;
+
+  const others = current.alternatives.filter((_, i) => i !== index);
+  queue.songs[0] = {
+    ...pick,
+    source: current.source,
+    requestedBy: current.requestedBy,
+    variant: looksLikeVariant(pick),
+    alternatives: [...others, { ...current, alternatives: undefined, variant: undefined }],
+  };
+  queue.ignoreIdle = true;
+  await playSong(queue);
+  return queue.songs[0];
+}
+
+// oEmbed still answers from blocked hosts, so a pasted link can at least give
+// us a title to search for elsewhere.
+async function youtubeTitle(url) {
+  try {
+    const res = await fetch(`https://www.youtube.com/oembed?format=json&url=${encodeURIComponent(url)}`);
+    if (!res.ok) return null;
+    const data = await res.json();
+    return (data.title || '').trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+// A search listing never touches YouTube's player, so results can come back on
+// a host that is not allowed to fetch the audio. Confirm before trusting them.
+async function youtubePlayable(url) {
+  try {
+    await ytdlpInfo(url);
+    return true;
+  } catch (err) {
+    if (isYoutubeBlock(err)) return false;
+    throw err;
+  }
+}
+
+async function musicSearch(query, limit = 1, targetSeconds = 0) {
+  if (!youtubeBlocked()) {
+    try {
+      const results = await youtubeSearch(query, limit);
+      if (results.length && await youtubePlayable(results[0].url)) return results;
+    } catch (err) {
+      if (!isYoutubeBlock(err)) throw err;
+    }
+  }
+  const ranked = await soundcloudSearch(query, limit, targetSeconds);
+  if (!ranked.length) throw new Error(`Nothing playable found for "${query}".`);
+  return withAlternatives(ranked, limit);
 }
 
 async function ytdlpInfo(url) {
-  const { stdout } = await execFileAsync(YTDLP, [
-    url,
-    '--dump-json',
-    '--no-warnings',
-    '--no-playlist',
-  ], { maxBuffer: 10 * 1024 * 1024 });
-  return JSON.parse(stdout.trim().split('\n')[0]);
+  try {
+    const { stdout } = await execFileAsync(YTDLP, [
+      url,
+      '--dump-json',
+      '--no-playlist',
+      ...ytdlpFlags(url),
+    ], { maxBuffer: 10 * 1024 * 1024 });
+    return JSON.parse(stdout.trim().split('\n')[0]);
+  } catch (err) {
+    throw wrapYtdlpError(err);
+  }
 }
 
 async function ytdlpPlaylist(url) {
-  const { stdout } = await execFileAsync(YTDLP, [
-    url,
-    '--dump-json',
-    '--flat-playlist',
-    '--no-warnings',
-    '--playlist-end', '50',
-  ], { maxBuffer: 10 * 1024 * 1024 });
+  try {
+    const { stdout } = await execFileAsync(YTDLP, [
+      url,
+      '--dump-json',
+      '--flat-playlist',
+      '--playlist-end', '50',
+      ...ytdlpFlags(url),
+    ], { maxBuffer: 10 * 1024 * 1024 });
 
-  return stdout.trim().split('\n')
-    .filter(l => l.trim())
-    .map(line => {
-      try { return songFromYtdlp(JSON.parse(line), 'YouTube'); }
-      catch { return null; }
-    })
-    .filter(Boolean);
+    return parseYtdlpJson(stdout, 'YouTube');
+  } catch (err) {
+    throw wrapYtdlpError(err);
+  }
 }
 
 /**
@@ -102,11 +333,11 @@ async function ytdlpPlaylist(url) {
 async function getDirectAudioUrl(url) {
   const { stdout } = await execFileAsync(YTDLP, [
     url,
-    '-f', 'bestaudio/best',
-    '-g',                 // print direct URL, don't download
+    '-f', audioFormatFor(url),
+    '-g',
     '--no-playlist',
     '--quiet',
-    '--no-warnings',
+    ...ytdlpFlags(url),
   ], { maxBuffer: 1024 * 1024 });
   return stdout.trim().split('\n')[0];
 }
@@ -124,22 +355,22 @@ async function resolveDeezer(url) {
     return data;
   }
 
-  async function deezerTrackToYt(artist, title) {
-    const results = await youtubeSearch(`${artist} ${title}`, 1);
-    if (!results.length) throw new Error(`No YouTube match for "${artist} - ${title}"`);
-    return { ...results[0], source: 'Deezer → YouTube' };
+  async function deezerTrackToYt(artist, title, seconds = 0) {
+    const results = await musicSearch(`${artist} ${title}`, 1, seconds);
+    if (!results.length) throw new Error(`No match for "${artist} - ${title}"`);
+    return { ...results[0], source: `Deezer → ${results[0].source}` };
   }
 
   if (trackMatch) {
     const data = await dzFetch(`/track/${trackMatch[1]}`);
-    return [await deezerTrackToYt(data.artist.name, data.title)];
+    return [await deezerTrackToYt(data.artist.name, data.title, data.duration || 0)];
   }
   if (albumMatch) {
     const data   = await dzFetch(`/album/${albumMatch[1]}`);
     const tracks = data.tracks?.data || [];
     const songs  = [];
     for (const t of tracks.slice(0, 50)) {
-      try { songs.push(await deezerTrackToYt(t.artist.name, t.title)); } catch {}
+      try { songs.push(await deezerTrackToYt(t.artist.name, t.title, t.duration || 0)); } catch {}
     }
     if (!songs.length) throw new Error('No tracks resolved from that Deezer album.');
     return songs;
@@ -149,7 +380,7 @@ async function resolveDeezer(url) {
     const tracks = data.tracks?.data || [];
     const songs  = [];
     for (const t of tracks.slice(0, 50)) {
-      try { songs.push(await deezerTrackToYt(t.artist.name, t.title)); } catch {}
+      try { songs.push(await deezerTrackToYt(t.artist.name, t.title, t.duration || 0)); } catch {}
     }
     if (!songs.length) throw new Error('No tracks resolved from that Deezer playlist.');
     return songs;
@@ -209,20 +440,21 @@ async function spotifyResolve(url) {
     const artist = t.artists?.[0]?.name || '';
     const query = `${artist} ${t.name || ''}`.trim();
     if (!query) return null;
+    const seconds = Math.round((t.duration_ms || 0) / 1000);
     try {
-      const found = await youtubeSearch(query, 1);
+      const found = await musicSearch(query, 1, seconds);
       if (!found.length) return null;
-      console.log(`[Music] Spotify metadata → YouTube search "${query}" → ${found[0].url}`);
-      return { ...found[0], source: 'Spotify → YouTube', spotifyQuery: query };
+      console.log(`[Music] Spotify metadata → ${found[0].source} search "${query}" → ${found[0].url}`);
+      return { ...found[0], source: `Spotify → ${found[0].source}`, spotifyQuery: query };
     } catch (err) {
-      console.error(`[Music] Spotify → YouTube search failed for "${query}":`, err.message);
+      console.error(`[Music] Spotify search failed for "${query}":`, err.message);
       return null;
     }
   };
   if (type === 'track') {
     const t = await api(`tracks/${id}`);
     const s = await toSearch(t);
-    if (!s) throw new Error(`No YouTube match for Spotify track "${t.name}".`);
+    if (!s) throw new Error(`No playable match for Spotify track "${t.name}".`);
     return [s];
   }
   const data = await api(`${type}s/${id}`);
@@ -232,28 +464,55 @@ async function spotifyResolve(url) {
     const s = await toSearch(t);
     if (s) songs.push(s);
   }
-  if (!songs.length) throw new Error('No YouTube matches found for that Spotify collection.');
+  if (!songs.length) throw new Error('No playable matches found for that Spotify collection.');
   return songs;
 }
 
+function extractPlayQuery(raw) {
+  const text = String(raw || '').trim();
+  const url = text.match(/https?:\/\/[^\s<>"'`]+|spotify:[a-z]+:[A-Za-z0-9]+/i);
+  if (url) return url[0].replace(/[),.;]+$/g, '');
+  return text.replace(/^\/music\s+play(?:\s+query:)?\s*/i, '').trim();
+}
+
 async function search(query, limit = 1) {
+  query = extractPlayQuery(query);
   if (/spotify\.com|spotify:/i.test(query)) return spotifyResolve(query);
-  if (/soundcloud\.com/i.test(query)) throw new Error('SoundCloud is not used as a playback source. Search by song name, YouTube, Spotify, or Deezer.');
   if (/deezer\.com/i.test(query)) return resolveDeezer(query);
-  if (/youtube\.com\/playlist|youtu\.be\/.*[?&]list=|list=/i.test(query) && /youtube\.com|youtu\.be/i.test(query)) {
-    const songs = await ytdlpPlaylist(query);
-    if (!songs.length) throw new Error('No videos found in that YouTube playlist.');
-    return songs;
-  }
-  if (/youtube\.com|youtu\.be/i.test(query)) {
+  if (/soundcloud\.com/i.test(query)) {
     const info = await ytdlpInfo(query);
-    const song = songFromYtdlp(info, 'YouTube');
-    if (!song) throw new Error('Could not resolve that YouTube URL.');
+    const song = songFromYtdlp(info, 'SoundCloud');
+    if (!song) throw new Error('Could not resolve that SoundCloud link.');
     return [song];
   }
-  const results = await youtubeSearch(query, limit);
-  if (!results.length) throw new Error('No results found on YouTube.');
-  return results;
+  if (/youtube\.com\/playlist|youtu\.be\/.*[?&]list=|list=/i.test(query) && /youtube\.com|youtu\.be/i.test(query)) {
+    try {
+      const songs = await ytdlpPlaylist(query);
+      if (songs.length) return songs;
+      throw new Error('No videos found in that YouTube playlist.');
+    } catch (err) {
+      if (!isYoutubeBlock(err)) throw err;
+      throw new Error('YouTube is blocking this server, and playlists can only come from YouTube. Search by song name instead.');
+    }
+  }
+  if (/youtube\.com|youtu\.be/i.test(query)) {
+    if (!youtubeBlocked()) {
+      try {
+        const song = songFromYtdlp(await ytdlpInfo(query), 'YouTube');
+        if (song) return [song];
+      } catch (err) {
+        if (!isYoutubeBlock(err)) throw err;
+      }
+    }
+    const title = await youtubeTitle(query);
+    if (!title) throw new Error('YouTube is blocking this server and the video title could not be read. Try searching by song name.');
+    const ranked = await soundcloudSearch(title, 1);
+    if (!ranked.length) throw new Error(`YouTube is blocking this server and no SoundCloud match was found for "${title}".`);
+    const [best] = withAlternatives(ranked, 1);
+    console.log(`[Music] YouTube link "${title}" → SoundCloud ${best.url}`);
+    return [{ ...best, source: 'YouTube → SoundCloud' }];
+  }
+  return musicSearch(query, limit);
 }
 
 const EQ_ORDER = ['clean', 'bass', 'vocal', 'treble', 'punch'];
@@ -322,6 +581,46 @@ function buildControls(queue) {
   ];
 }
 
+// SoundCloud matching is imperfect, so the reply to /music play doubles as a
+// version picker whenever other candidates were found.
+function buildPickEmbed(song, queue, switched = false) {
+  const queued = queue.songs[0] !== song && queue.playing;
+  const embed = new EmbedBuilder()
+    .setColor('#1DB954')
+    .setTitle(switched ? '🔀 Switched version' : queued ? '✅ Added to Queue' : '▶️ Starting playback')
+    .setDescription(`**[${song.title}](${song.url})**`)
+    .setThumbnail(song.thumbnail || null)
+    .addFields(
+      { name: 'Duration', value: fmt(song.duration),                      inline: true },
+      { name: 'Artist',   value: song.author || 'Unknown',                inline: true },
+      { name: 'Source',   value: song.source || 'YouTube',                inline: true },
+    );
+
+  if (song.alternatives?.length) {
+    embed.addFields({
+      name: song.variant
+        ? '⚠️ This looks like a remix or edit — try another version'
+        : 'Not the version you wanted?',
+      value: song.alternatives
+        .map((a, i) => `**${i + 1}.** [${a.title}](${a.url}) \`${fmt(a.duration)}\``)
+        .join('\n'),
+    });
+  }
+  return embed;
+}
+
+function buildAltControls(song) {
+  if (!song.alternatives?.length) return [];
+  return [new ActionRowBuilder().addComponents(
+    song.alternatives.map((a, i) =>
+      new ButtonBuilder()
+        .setCustomId(`music_alt_${i}`)
+        .setStyle(ButtonStyle.Secondary)
+        .setLabel(`Play ${i + 1} (${fmt(a.duration)})`)
+    )
+  )];
+}
+
 function buildQueueEmbed(queue) {
   const lines = queue.songs.slice(0, 15).map((s, i) =>
     i === 0
@@ -383,12 +682,11 @@ async function playSong(queue) {
     // Pipe yt-dlp → FFmpeg. Direct googlevideo URLs from `-g` 403 in FFmpeg (missing client headers).
     const ytdlp = spawn(YTDLP, [
       song.url,
-      '-f', 'bestaudio[acodec=opus]/bestaudio/best',
+      '-f', audioFormatFor(song.url),
       '-o', '-',
       '--no-playlist',
-      '--no-warnings',
       '--quiet',
-      '--extractor-args', 'youtube:player_client=android,ios,web',
+      ...ytdlpFlags(song.url),
     ], { stdio: ['ignore', 'pipe', 'pipe'] });
     const ffmpeg = spawn(FFMPEG, [
       '-hide_banner', '-loglevel', 'error',
@@ -525,6 +823,21 @@ async function handleButton(interaction) {
     return interaction.reply({ embeds: [buildQueueEmbed(queue)], flags: 64 });
   }
 
+  const altMatch = id.match(/^music_alt_(\d)$/);
+  if (altMatch) {
+    await interaction.deferUpdate();
+    const picked = await playAlternative(interaction.guildId, Number(altMatch[1]));
+    if (!picked) {
+      await interaction.followUp({ content: '❌ That version is no longer available.', flags: 64 }).catch(() => {});
+      return;
+    }
+    await interaction.editReply({
+      embeds:     [buildPickEmbed(picked, queue, true)],
+      components: buildAltControls(picked),
+    }).catch(() => {});
+    return;
+  }
+
   await interaction.deferUpdate();
 
   switch (id) {
@@ -582,7 +895,7 @@ async function handleButton(interaction) {
 
 module.exports = {
   getQueue, destroyQueue, createQueue,
-  search, playSong, handleButton,
-  buildNPEmbed, buildControls, buildQueueEmbed, fmt,
+  search, playSong, handleButton, playAlternative,
+  buildNPEmbed, buildControls, buildQueueEmbed, buildPickEmbed, buildAltControls, fmt,
   applyEq, cycleEq, EQ_PRESETS, EQ_ORDER,
 };
