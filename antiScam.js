@@ -31,6 +31,9 @@ function normalize(raw = '') {
     .replace(/[​-‍﻿­]/g, '') // zero-width / soft hyphen
     .toLowerCase();
   s = s.replace(/[Ѐ-ӿͰ-Ͽ＀-￯Ⰰ-ⷿ]/g, ch => HOMOGLYPHS[ch] || ch);
+  // Polish ą/ć/ę/ń/ó/ś/ź/ż fold away with the accent strip above, but ł is a
+  // single code point with no combining form, so it survives NFKD untouched.
+  s = s.replace(/\u0142/g, 'l');
   return s.replace(/\s+/g, ' ').trim();
 }
 
@@ -43,50 +46,81 @@ function deLeet(s = '') { return s.replace(/[013457890$@€!|]/g, c => LEET[c] |
 // is what builds confidence, so a scam that mixes "casino + giveaway + link"
 // scores far higher than a single stray word.
 
+// Polish patterns below are written against accent-folded text (normalize() turns
+// ą/ę/ś/ł into a/e/s/l), so they read as "wygrales", not "wygrałeś". They are kept
+// deliberately narrow: this bot also runs in a Polish community server, where a
+// false positive deletes a real message and kicks a real member. Everyday words on
+// their own ("gratulacje", "prezent", "darmowe") only count in a scam-shaped phrase.
 const CATEGORIES = [
   { name: 'nitro-gift', weight: 4, patterns: [
     /free\s*nitro/, /nitro\s*(gift|giveaway|code|generator|for\s*free)/, /claim.{0,15}nitro/,
     /gift(ed)?\s*you.{0,15}nitro/, /discord\s*nitro\s*(free|gift)/, /(1|3|12)\s*months?\s*(of\s*)?nitro/,
+    /darmowe?\s*nitro/, /nitro\s*(za\s*)?darmo/, /odbierz.{0,15}nitro/, /(kod|kody)\s*na\s*nitro/,
   ]},
   { name: 'celebrity-casino', weight: 4, patterns: [
     /mr\.?\s*beast/, /beast\s*games/, /(crypto|cryptocurrency)\s*casino/, /promo\s*code/,
     /withdrawal\s*success/, /rakeback/, /\bvip[\s-]*club\b/, /activate.{0,10}(code|bonus)/,
     /enter.{0,15}(promo\s*)?code/, /(deposit|register).{0,15}bonus/, /receive\s*your\s*\$?\d/,
     /(andrew\s*tate|kick\.com|stake\.com|csgo\w*\.\w+)/, /exclusive\s*(bonus|offer|reward)/,
+    /kod\s*promocyjny/, /kasyno\s*(online|krypto)/, /(bonus|premia)\s*(powitalny|bez\s*depozytu)/,
+    /darmowe\s*(spiny|zakrety)/, /wyplata\s*(udana|zrealizowana)/, /uzyj\s*kodu/,
   ]},
   { name: 'crypto', weight: 4, patterns: [
     /air\s*drop/, /(btc|eth|usdt|bitcoin|ethereum|solana|dogecoin)\b.{0,25}(free|giveaway|double|reward|claim|bonus)/,
     /double\s*your\s*(crypto|btc|eth|money|deposit|investment)/, /connect\s*your\s*wallet/,
     /(seed|recovery)\s*phrase/, /metamask|walletconnect|trust\s*wallet/, /guaranteed\s*(profit|returns?)/,
     /turn\s*\$?\d+.{0,10}(into|to)\s*\$?\d+/, /investment\s*(group|expert|opportunity)/,
+    /(kryptowalut|bitcoin|ethereum)\w*.{0,25}(darmo|zarob|podwoj|nagrod|bonus)/,
+    /podwoj\s*(swoje\s*)?(pieniadze|srodki|inwestycje)/, /polacz\s*(swoj\s*)?portfel/,
+    /fraza\s*(seed|odzyskiwania)/, /gwarantowany\s*(zysk|zwrot)/, /(inwestuj|inwestycja)\s*bez\s*ryzyka/,
+    /zamien\s*\d+\s*(zl|pln).{0,10}(na|w)\s*\d+/,
   ]},
   { name: 'giveaway', weight: 3, patterns: [
     /\bgiveaway\b/, /you('?ve| have)?\s*won/, /\byou\s*win\b/, /congratulations?.{0,20}(winner|won|selected)/,
     /claim\s*(your\s*)?(prize|reward|gift|winnings)/, /first\s*\d+\s*(people|users|members)/,
     /who('?s| is)?\s*first/, /\$\d{2,}\s*(usd|giveaway|prize|reward|cash)/, /limited\s*(time|spots?)/,
+    // "wygrales" on its own is ordinary gaming banter, so it only counts when a
+    // prize or a claim instruction follows it.
+    /\brozdanie\b/, /gratulacje.{0,25}(wygral|nagrod|zwyciez|wybran)/,
+    /wygrala?[sz]\b.{0,40}(nagrod|odbierz|kliknij|link|iphone|bitcoin|\d{2,}\s*(zl|pln|usd|euro))/,
+    /odbierz\s*(swoj[aą]?\s*)?(nagrod|prezent|wygran)/, /zwyciezc[aey]\s*(losowania|konkursu)/,
+    /pierwsz\w*\s*\d+\s*(osob|osoby|uzytkownik)/, /ograniczona\s*(liczba|oferta)/,
   ]},
   { name: 'steam', weight: 3, patterns: [
     /steam\s*(gift|community|nitro|trade)/, /stea[mr]n?community/, /steam.{0,10}(login|sign\s*in)/,
     /trade\s*offer/, /free\s*(game|games|skins?|cs\d*\s*skins?)/,
+    /darmowe\s*(skiny|klucze)/, /oferta\s*wymiany/, /zaloguj\s*sie\s*przez\s*steam/,
   ]},
   { name: 'malware-game', weight: 4, patterns: [
     /(try|test|play|check\s*out)\s*(out\s*)?my\s*(new\s*)?game/, /playtest|beta\s*test/, /game\s*i\s*(made|created|developed)/,
     /can\s*you\s*(test|try)\s*(my|this)/, /feedback\s*on\s*my\s*game/, /(download|install).{0,15}(dropbox|drive\.google|mediafire|mega\.nz|\.zip|\.rar|\.exe)/,
     /beta\s*(access|key|invite)/, /help\s*me\s*test/,
+    /(sprawdz|przetestuj|zagraj\s*w)\s*(moja|moje|nowa)\s*(gre|gra|gierk)/,
+    /gr[aey]\s*ktor[aą]\s*(zrobilem|stworzylem|napisalem)/, /pomoz\s*mi\s*(ja\s*)?przetestowac/,
+    /(pobierz|zainstaluj).{0,15}(mega\.nz|mediafire|dysk|\.zip|\.rar|\.exe)/,
   ]},
   { name: 'phishing-login', weight: 4, patterns: [
     /verify\s*your\s*(account|identity)/, /(login|log\s*in|sign\s*in)\s*to\s*(claim|verify|continue)/,
     /you('?ve| have)?\s*been\s*(reported|banned)/, /appeal\s*your\s*(ban|report)/, /account\s*(will\s*be\s*)?(suspended|deleted|terminated)/,
     /discord\s*(staff|team|support|moderation)\b.{0,30}(report|verify|ban|violat)/, /confirm\s*your\s*(email|password|identity)/,
     /scan\s*(the\s*)?qr/, /qr\s*code.{0,15}(claim|verify|login|nitro)/,
+    /zweryfikuj\s*(swoje\s*)?(konto|tozsamosc)/, /twoje\s*konto\s*(zostalo|bedzie)\s*(zablokowane|zbanowane|usuniete|zawieszone)/,
+    /zaloguj\s*sie\s*(aby|zeby)\s*(odebrac|potwierdzic|kontynuowac)/,
+    /potwierdz\s*(swoj|swoje)\s*(email|haslo|dane|tozsamosc)/, /zeskanuj\s*kod\s*qr/,
+    /zostales\s*(zglosz|zbanowan)/, /napisz\s*do\s*(administracji|moderacji)\s*discorda/,
   ]},
   { name: 'adult-bait', weight: 3, patterns: [
     /\bonlyfans\b/, /leaked?\s*(nudes?|content|onlyfans)/, /\bnudes?\b/, /18\s*\+.{0,15}(content|server|leaked)/,
     /teen\s*(porn|leak|content)/, /e-?girl.{0,10}(pics?|nudes?)/, /my\s*(private\s*)?(pics?|content)/,
+    /nagie\s*(zdjecia|fotki)/, /wyciek\w*\s*(zdjecia|nagrania|tresci)/,
+    /moje\s*(prywatne\s*)?(zdjecia|fotki|nagrania)/, /(sexting|erotyczne)\s*(zdjecia|czat)/,
   ]},
   { name: 'job-scam', weight: 3, patterns: [
     /(hiring|remote\s*job|paid\s*job).{0,20}(dm|message|apply)/, /earn\s*\$?\d+.{0,15}(per|daily|weekly|hour)/,
     /work\s*from\s*home.{0,15}\$/, /\bcrypto\s*trader\s*(wanted|needed)/,
+    /praca\s*(zdalna|z\s*domu).{0,20}(napisz|dm|wiadomosc|pw)/, /szybka\s*kasa/,
+    /zarabiaj\s*\d+.{0,15}(zl|pln|dziennie|tygodniowo|godzine)/, /zarob\s*\d+\s*(zl|pln)/,
+    /(szukam|zatrudniam)\s*(osob|ludzi).{0,20}(napisz|dm|pw)/,
   ]},
 ];
 

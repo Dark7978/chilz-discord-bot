@@ -52,8 +52,22 @@ That is it. Settings are stored locally in `data.json` (not committed).
 | `/recreate_channel` | Staff | Recreate a text channel (separate from `/clear`) |
 | `/staff` | Staff | Warn, kick, ban, mute |
 | `/antiscam` | Staff | Anti-scam settings |
+| `/scan` | Staff | Sweep old messages for scams the live filter never saw |
 
 AutoMod ladder: delete + warn → kick → 24-hour temp ban. No automatic permanent bans. Ticket close requests need staff approval.
+
+## Running in more than one server
+
+Some servers only want the moderation half. `/setup` takes a **profile**:
+
+- `everything` — music, tickets, AI support, moderation (the default)
+- `moderation only` — AutoMod and anti-scam, nothing else
+
+Commands are registered per server from the profile, so a moderation-only server never sees `/music` or `/ticket` at all, and AI support does not read its messages. Switching profile re-registers that server's commands immediately.
+
+`/scan` handles the backlog a live filter cannot: it walks message history, runs the same detector (including OCR on images), and reports what it finds. It only deletes when you pass `action: delete the scam messages`. It stops at 150 images or 8 minutes and tells you, so run it again to keep going.
+
+Anti-scam reads English and Polish, in message text and inside images. Set `OCR_LANGS=eng+pol` so image text in both languages is picked up.
 
 ## Music notes
 

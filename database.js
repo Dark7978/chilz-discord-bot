@@ -49,6 +49,8 @@ class Database {
       if (!('antiScamOcr'            in g)) { g.antiScamOcr            = true; dirty = true; }
       if (!('antiScamStrikeLimit'    in g)) { g.antiScamStrikeLimit    = 3;    dirty = true; }
       if (!('honeypotChannelId'      in g)) { g.honeypotChannelId      = null; dirty = true; }
+      // Existing servers keep every feature; only a deliberate change narrows one.
+      if (!('profile'                in g)) { g.profile                = 'full'; dirty = true; }
       if (!('ticketEscalations'     in g)) { g.ticketEscalations       = {}; dirty = true; }
       if (!('autoModIncidents'     in g)) { g.autoModIncidents         = {}; dirty = true; }
       if (!('autoModTempBans'     in g)) { g.autoModTempBans           = {}; dirty = true; }
@@ -84,6 +86,7 @@ class Database {
         autoModIncidents:       {},
         autoModTempBans:        {},
         appealChannelId:        null,
+        profile:                'full',
         strikes:               {},
         appeals:               {},
       };

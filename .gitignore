@@ -11,7 +11,7 @@ ffbuild/
 .claude/
 bridge-server.js
 bridge-status.ps1
-eng.traineddata
+*.traineddata
 youtube.cookies.txt
 *.cookies.txt
 .DS_Store
