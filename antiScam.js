@@ -8,8 +8,8 @@
 //
 // Nothing here touches staff/owner or bots.
 
-const { EmbedBuilder, PermissionFlagsBits } = require('discord.js');
-const { hasStaffRole } = require('./staffAccess');
+const { EmbedBuilder } = require('discord.js');
+const { isStaffMember } = require('./staffAccess');
 const ocr = require('./ocr');
 const banAppeal = require('./banAppeal');
 
@@ -205,6 +205,46 @@ function analyze(message, isNew = false, extraText = '') {
 
 function daysBetween(a, b) { return Math.abs(a - b) / 86_400_000; }
 
+/** Webhooks and APP posts are not members. Skipping them is how the Polish raid sat in #propozycje. */
+function isWebhookOrApp(message) {
+  return Boolean(message.webhookId || message.applicationId);
+}
+
+function skipIncoming(message, client) {
+  if (!message.guild) return true;
+  if (client?.user && message.author?.id === client.user.id) return true;
+  if (message.author?.bot && !isWebhookOrApp(message)) return true;
+  return false;
+}
+
+function imageUrlsFrom(message, max = 3) {
+  const urls = [];
+  for (const a of message.attachments?.values?.() || []) {
+    if ((a.contentType || '').startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp)$/i.test(a.name || a.url || '')) {
+      urls.push(a.url);
+    }
+  }
+  for (const e of message.embeds || []) {
+    const u = e.image?.url || e.thumbnail?.url;
+    if (u) urls.push(u);
+  }
+  return [...new Set(urls)].slice(0, max);
+}
+
+async function deleteScamWebhook(message) {
+  if (!message.webhookId) return false;
+  try {
+    const hooks = await message.channel.fetchWebhooks();
+    const hook = hooks.get(message.webhookId);
+    if (!hook) return false;
+    await hook.delete('Anti-scam: this webhook posted scam content');
+    return true;
+  } catch (err) {
+    console.error('[AntiScam] webhook delete failed:', err.message);
+    return false;
+  }
+}
+
 async function postAlert(guild, settings, embed) {
   const chId = settings?.antiScamAlertChannelId || settings?.logChannelId;
   if (!chId) return;
@@ -217,26 +257,25 @@ async function postAlert(guild, settings, embed) {
  */
 async function handleMessage(message, client) {
   try {
-    if (!message.guild || message.author.bot || !message.member) return;
+    if (skipIncoming(message, client)) return;
 
     const settings = client.db.getGuildSettings(message.guild.id);
     if (!settings || settings.antiScamEnabled === false) return;
 
-    // Never touch staff / owner / anyone who can manage messages.
-    const isStaff = hasStaffRole(message.member, settings);
-    const isOwner = settings.ownerRoleId && message.member.roles.cache.has(settings.ownerRoleId);
-    const canMod  = message.member.permissions.has(PermissionFlagsBits.ManageMessages);
+    const webhook = isWebhookOrApp(message);
 
-    if (isStaff || isOwner) return;
-    if (canMod) return;
+    // Never touch staff / owner / anyone with real mod permissions.
+    if (message.member && isStaffMember(message.member, settings)) return;
 
     // How "new" is this member? Use the younger of account age and join age.
+    // Webhooks have no membership — treat them as throwaways so a hit deletes
+    // the post (and the webhook) instead of timing out a fake APP user.
     const newDays      = settings.antiScamNewAccountDays ?? 7;
     const accountAge   = daysBetween(Date.now(), message.author.createdTimestamp);
-    const joinedAge    = message.member.joinedTimestamp
+    const joinedAge    = message.member?.joinedTimestamp
       ? daysBetween(Date.now(), message.member.joinedTimestamp)
       : accountAge;
-    const isNew        = accountAge < newDays || joinedAge < newDays;
+    const isNew        = webhook || accountAge < newDays || joinedAge < newDays;
 
     // First pass — text only.
     let verdict  = analyze(message, isNew);
@@ -245,12 +284,10 @@ async function handleMessage(message, client) {
     // ── OCR pass ────────────────────────────────────────────────────────────
     // If text alone didn't flag it but the message has image(s), read the text
     // out of the images (fake MrBeast tweet / "Withdrawal Successful" screenshots
-    // hide all their scam wording inside the picture).
+    // hide all their scam wording inside the picture). Embeds count too —
+    // webhook/APP posts often put the screenshot in an embed, not an attachment.
     if (!verdict.hit && settings.antiScamOcr !== false) {
-      const imageUrls = [...message.attachments.values()]
-        .filter(a => (a.contentType || '').startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp)$/i.test(a.name || a.url))
-        .slice(0, 3)               // cap at 3 images per message
-        .map(a => a.url);
+      const imageUrls = imageUrlsFrom(message, 3);
 
       if (imageUrls.length) {
         const texts = await Promise.all(imageUrls.map(u => ocr.readImage(u)));
@@ -274,15 +311,33 @@ async function handleMessage(message, client) {
     // Always nuke the message first.
     await message.delete().catch(() => {});
 
+    if (webhook) verdict.reasons.push('webhook/APP post');
+
     const baseEmbed = new EmbedBuilder()
       .setTimestamp()
       .addFields(
         { name: 'User',        value: `${message.author} \`${message.author.tag}\` (${message.author.id})`, inline: false },
-        { name: 'Account age', value: `${accountAge.toFixed(1)} days`, inline: true },
-        { name: 'In server',   value: `${joinedAge.toFixed(1)} days`,  inline: true },
+        { name: 'Account age', value: webhook ? 'webhook / APP' : `${accountAge.toFixed(1)} days`, inline: true },
+        { name: 'In server',   value: webhook ? 'n/a' : `${joinedAge.toFixed(1)} days`,  inline: true },
         { name: 'Signals',     value: verdict.reasons.join(', ') || 'heuristic', inline: false },
         { name: 'Message',     value: `\`\`\`${contentSnippet.replace(/`/g, "'")}\`\`\`` },
       );
+
+    if (webhook) {
+      const killedHook = await deleteScamWebhook(message);
+      client.db.addModLog(message.guild.id, {
+        action: 'AUTO-DELETE (scam webhook)', targetId: message.author.id,
+        moderatorId: client.user.id, reason: verdict.reasons.join(', '),
+      });
+      baseEmbed.setColor('#ff4500')
+        .setTitle('🪝 Scam blocked — webhook / APP post deleted')
+        .setDescription(killedHook
+          ? 'The webhook that posted it was deleted so it cannot keep firing.'
+          : 'Could not delete the webhook (need Manage Webhooks). The post itself is gone.');
+      await postAlert(message.guild, settings, baseEmbed);
+      console.log(`[AntiScam] Deleted webhook/APP post from ${message.author.tag} (${verdict.reasons.join(', ')})`);
+      return;
+    }
 
     if (isNew) {
       // ── New account → strike, then KICK or (at limit) BAN ────────────────
@@ -361,4 +416,4 @@ async function handleMessage(message, client) {
   }
 }
 
-module.exports = { handleMessage, analyze };
+module.exports = { handleMessage, analyze, skipIncoming, isWebhookOrApp, imageUrlsFrom };

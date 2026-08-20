@@ -65,7 +65,7 @@ Some servers only want the moderation half. `/setup` takes a **profile**:
 
 Commands are registered per server from the profile, so a moderation-only server never sees `/music` or `/ticket` at all, and AI support does not read its messages. Switching profile re-registers that server's commands immediately.
 
-`/scan` handles the backlog a live filter cannot: it walks message history, runs the same detector (including OCR on images), and reports what it finds. It only deletes when you pass `action: delete the scam messages`. It stops at 150 images or 8 minutes and tells you, so run it again to keep going.
+`/scan` handles the backlog a live filter cannot: one run walks every readable channel, thread and forum post with no image or time cap (progress updates while it works; if Discord's 15-minute reply window runs out, the result is posted in the channel). It uses the same detector, including OCR on attachments and embed images. Webhook and APP posts are included; Chilz's own messages and anyone with administrator or moderator permissions are skipped. It only deletes when you pass `action: delete the scam messages`.
 
 Anti-scam reads English and Polish, in message text and inside images. Set `OCR_LANGS=eng+pol` so image text in both languages is picked up.
 

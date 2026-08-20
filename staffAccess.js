@@ -14,11 +14,28 @@ function hasStaffRole(member, settings) {
   return false;
 }
 
+// Anything that is actually a moderator on Discord — not just a custom staff
+// role. Historical /scan messages often have no member attached, so callers
+// must fetch the member first; this is the permission check once they have it.
+const MOD_PERMS = [
+  PermissionFlagsBits.Administrator,
+  PermissionFlagsBits.ManageGuild,
+  PermissionFlagsBits.ManageChannels,
+  PermissionFlagsBits.ManageMessages,
+  PermissionFlagsBits.KickMembers,
+  PermissionFlagsBits.BanMembers,
+  PermissionFlagsBits.ModerateMembers,
+];
+
+function hasModPermissions(member) {
+  if (!member?.permissions) return false;
+  return MOD_PERMS.some(bit => member.permissions.has(bit));
+}
+
 function isStaffMember(member, settings) {
   if (!member) return false;
-  return hasStaffRole(member, settings)
-    || member.permissions.has(PermissionFlagsBits.ManageMessages)
-    || member.permissions.has(PermissionFlagsBits.Administrator);
+  if (member.guild?.ownerId && member.id === member.guild.ownerId) return true;
+  return hasStaffRole(member, settings) || hasModPermissions(member);
 }
 
 function staffPing(settings) {
@@ -34,6 +51,7 @@ function staffMentionIds(settings) {
 module.exports = {
   extraStaffRoleId,
   hasStaffRole,
+  hasModPermissions,
   isStaffMember,
   staffPing,
   staffMentionIds,
