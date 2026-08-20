@@ -583,5 +583,6 @@ async function handleButton(interaction) {
 module.exports = {
   getQueue, destroyQueue, createQueue,
   search, playSong, handleButton,
+  buildNPEmbed, buildControls, buildQueueEmbed, fmt,
   applyEq, cycleEq, EQ_PRESETS, EQ_ORDER,
 };
