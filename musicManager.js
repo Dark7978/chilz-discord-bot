@@ -137,7 +137,9 @@ const SC_MIN_SECONDS = 40;
 // SoundCloud is mostly reuploads, so searching for a well known song returns a
 // wall of remixes, bootlegs and hour-long mixes. Rank them so the version that
 // actually resembles the requested track wins.
-const VARIANT_RE = /\b(remix|bootleg|edit|flip|mashup|nightcore|sped ?up|slowed|reverb|cover|karaoke|instrumental|acapella|parody|tribute|remake|refix|rework|vip|hardstyle|techno|dubstep|uptempo|afro ?house|live|mix|8d)\b/i;
+// "x", "vs" and "×" catch mashups, which name two songs and so never carry a
+// give-away word like "remix".
+const VARIANT_RE = /\b(remix|bootleg|edit|flip|mashup|medley|transition|nightcore|sped ?up|slowed|reverb|cover|karaoke|instrumental|acapella|parody|tribute|remake|refix|rework|vip|hardstyle|techno|dubstep|uptempo|afro ?house|live|mix|8d|x|vs)\b|×/i;
 const TITLE_NOISE_RE = /\b(official|video|audio|lyrics?|hd|4k|full|remastered|free ?download|ft|feat|the|and|a)\b/g;
 
 function titleTokens(text) {
@@ -151,6 +153,14 @@ function titleTokens(text) {
 
 function looksLikeVariant(song) {
   return VARIANT_RE.test(song?.title || '');
+}
+
+// Worth playing without looking any further: not an alternate cut, and the right
+// length when we know what the right length is.
+function isConfidentMatch(song, reference) {
+  if (!song || looksLikeVariant(song)) return false;
+  if (!reference.duration || !song.duration) return true;
+  return Math.abs(song.duration - reference.duration) / reference.duration <= 0.15;
 }
 
 function rankCandidates(songs, query, reference) {
@@ -227,9 +237,13 @@ async function referenceTrack(query) {
   return {};
 }
 
-async function scFetch(phrase, want) {
+// Every extra result is another request, so ask for a small page first and only
+// pay for a deeper one when the cheap passes come up short.
+const SC_WIDE = 15;
+
+async function scFetch(phrase, size) {
   const args = [
-    `scsearch${want}:${phrase}`,
+    `scsearch${size}:${phrase}`,
     '--dump-json',
     '--no-playlist',
     '--no-warnings',
@@ -239,10 +253,12 @@ async function scFetch(phrase, want) {
   try {
     ({ stdout } = await execFileAsync(YTDLP, args, { maxBuffer: 20 * 1024 * 1024 }));
   } catch (err) {
-    // DRM'd or region-locked entries make yt-dlp exit non-zero even though the
-    // rest of the results came through fine.
-    if (!err.stdout?.trim()) throw err;
-    stdout = err.stdout;
+    // --ignore-errors still exits non-zero. DRM'd, deleted and region-locked
+    // uploads are a normal part of SoundCloud results rather than a failure —
+    // an artist's official uploads are frequently all DRM protected.
+    const skipped = /DRM protected|unavailable|is private|Unable to download/i.test(err.stderr || '');
+    if (!err.stdout?.trim() && !skipped) throw err;
+    stdout = err.stdout || '';
   }
   const songs = parseYtdlpJson(stdout, 'SoundCloud');
   const full  = songs.filter(s => !s.duration || s.duration >= SC_MIN_SECONDS);
@@ -250,19 +266,41 @@ async function scFetch(phrase, want) {
 }
 
 async function soundcloudSearch(query, limit = 1, targetSeconds = 0) {
-  const want = Math.min(Math.max(limit * 5, 5), 25);
   const reference = await referenceTrack(query);
   if (targetSeconds) reference.duration = targetSeconds;
+  const wantsVariant = VARIANT_RE.test(query);
 
   // A reupload title ("(37,34,31,28Hz) ... (Rebassed By DJBC)") matches nothing,
   // so retry with the tidied title and the canonical name before giving up.
   const phrases = [...new Set([query, cleanQuery(query), reference.name].filter(Boolean))];
-  for (const phrase of phrases) {
-    console.log(`[Music] SoundCloud search limit=${limit} query="${phrase}"`);
-    const songs = await scFetch(phrase, want);
-    if (songs.length) return rankCandidates(songs, query, reference);
+  const base    = Math.min(Math.max(limit * 5, 5), 25);
+  const wide    = Math.min(Math.max(limit * 5, SC_WIDE), 25);
+
+  // At most four searches: each phrasing cheaply, then one deeper pass on what
+  // was actually asked for.
+  const attempts = [...phrases.map(phrase => ({ phrase, size: base })),
+                    { phrase: phrases[0], size: wide }];
+  const tried = new Set();
+  const pool  = new Map();
+
+  for (const { phrase, size } of attempts) {
+    const key = `${size}:${phrase}`;
+    if (tried.has(key)) continue;
+    tried.add(key);
+
+    console.log(`[Music] SoundCloud search size=${size} query="${phrase}"`);
+    for (const song of await scFetch(phrase, size)) {
+      if (!pool.has(song.url)) pool.set(song.url, song);
+    }
+    if (!pool.size) continue;
+
+    // Stop early only for a match worth stopping on. An edit or a wrong-length
+    // upload winning means the real track is probably in a later attempt, so
+    // everything found so far is ranked together rather than one page at a time.
+    const ranked = rankCandidates([...pool.values()], query, reference);
+    if (wantsVariant || isConfidentMatch(ranked[0], reference)) return ranked;
   }
-  return [];
+  return pool.size ? rankCandidates([...pool.values()], query, reference) : [];
 }
 
 // Attach the runner-up versions so a bad match is one click from being fixed.
@@ -331,7 +369,7 @@ async function musicSearch(query, limit = 1, targetSeconds = 0) {
     }
   }
   const ranked = await soundcloudSearch(query, limit, targetSeconds);
-  if (!ranked.length) throw new Error(`Nothing playable found for "${query}".`);
+  if (!ranked.length) throw new Error(`Nothing playable found for "${query}". Try adding the artist name.`);
   return withAlternatives(ranked, limit);
 }
 
