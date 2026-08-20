@@ -7,9 +7,13 @@ const { createWorker } = require('tesseract.js');
 
 let workerPromise = null;
 
+// One worker serves every server, so the language list is the union of what they
+// speak. Tesseract downloads each language's data once, on first use.
+const LANGS = process.env.OCR_LANGS || 'eng';
+
 async function getWorker() {
   if (!workerPromise) {
-    workerPromise = createWorker('eng').catch(err => {
+    workerPromise = createWorker(LANGS).catch(err => {
       workerPromise = null;              // allow a later retry if init failed
       throw err;
     });

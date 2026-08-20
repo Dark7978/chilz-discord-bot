@@ -8,8 +8,8 @@
 //
 // Nothing here touches staff/owner or bots.
 
-const { EmbedBuilder, PermissionFlagsBits } = require('discord.js');
-const { hasStaffRole } = require('./staffAccess');
+const { EmbedBuilder } = require('discord.js');
+const { isStaffMember } = require('./staffAccess');
 const ocr = require('./ocr');
 const banAppeal = require('./banAppeal');
 
@@ -31,6 +31,9 @@ function normalize(raw = '') {
     .replace(/[​-‍﻿­]/g, '') // zero-width / soft hyphen
     .toLowerCase();
   s = s.replace(/[Ѐ-ӿͰ-Ͽ＀-￯Ⰰ-ⷿ]/g, ch => HOMOGLYPHS[ch] || ch);
+  // Polish ą/ć/ę/ń/ó/ś/ź/ż fold away with the accent strip above, but ł is a
+  // single code point with no combining form, so it survives NFKD untouched.
+  s = s.replace(/\u0142/g, 'l');
   return s.replace(/\s+/g, ' ').trim();
 }
 
@@ -43,50 +46,85 @@ function deLeet(s = '') { return s.replace(/[013457890$@€!|]/g, c => LEET[c] |
 // is what builds confidence, so a scam that mixes "casino + giveaway + link"
 // scores far higher than a single stray word.
 
+// Polish patterns below are written against accent-folded text (normalize() turns
+// ą/ę/ś/ł into a/e/s/l), so they read as "wygrales", not "wygrałeś". They are kept
+// deliberately narrow: this bot also runs in a Polish community server, where a
+// false positive deletes a real message and kicks a real member. Everyday words on
+// their own ("gratulacje", "prezent", "darmowe") only count in a scam-shaped phrase.
 const CATEGORIES = [
   { name: 'nitro-gift', weight: 4, patterns: [
     /free\s*nitro/, /nitro\s*(gift|giveaway|code|generator|for\s*free)/, /claim.{0,15}nitro/,
     /gift(ed)?\s*you.{0,15}nitro/, /discord\s*nitro\s*(free|gift)/, /(1|3|12)\s*months?\s*(of\s*)?nitro/,
+    /darmowe?\s*nitro/, /nitro\s*(za\s*)?darmo/, /odbierz.{0,15}nitro/, /(kod|kody)\s*na\s*nitro/,
   ]},
   { name: 'celebrity-casino', weight: 4, patterns: [
     /mr\.?\s*beast/, /beast\s*games/, /(crypto|cryptocurrency)\s*casino/, /promo\s*code/,
     /withdrawal\s*success/, /rakeback/, /\bvip[\s-]*club\b/, /activate.{0,10}(code|bonus)/,
     /enter.{0,15}(promo\s*)?code/, /(deposit|register).{0,15}bonus/, /receive\s*your\s*\$?\d/,
     /(andrew\s*tate|kick\.com|stake\.com|csgo\w*\.\w+)/, /exclusive\s*(bonus|offer|reward)/,
+    /kod\s*promocyjny/, /kasyno\s*(online|krypto)/, /(bonus|premia)\s*(powitalny|bez\s*depozytu)/,
+    /darmowe\s*(spiny|zakrety)/, /wyplata\s*(udana|zrealizowana)/, /uzyj\s*kodu/,
   ]},
   { name: 'crypto', weight: 4, patterns: [
     /air\s*drop/, /(btc|eth|usdt|bitcoin|ethereum|solana|dogecoin)\b.{0,25}(free|giveaway|double|reward|claim|bonus)/,
     /double\s*your\s*(crypto|btc|eth|money|deposit|investment)/, /connect\s*your\s*wallet/,
     /(seed|recovery)\s*phrase/, /metamask|walletconnect|trust\s*wallet/, /guaranteed\s*(profit|returns?)/,
     /turn\s*\$?\d+.{0,10}(into|to)\s*\$?\d+/, /investment\s*(group|expert|opportunity)/,
+    /(kryptowalut|bitcoin|ethereum)\w*.{0,25}(darmo|zarob|podwoj|nagrod|bonus)/,
+    /podwoj\s*(swoje\s*)?(pieniadze|srodki|inwestycje)/, /polacz\s*(swoj\s*)?portfel/,
+    /fraza\s*(seed|odzyskiwania)/, /gwarantowany\s*(zysk|zwrot)/, /(inwestuj|inwestycja)\s*bez\s*ryzyka/,
+    /zamien\s*\d+\s*(zl|pln).{0,10}(na|w)\s*\d+/,
   ]},
   { name: 'giveaway', weight: 3, patterns: [
     /\bgiveaway\b/, /you('?ve| have)?\s*won/, /\byou\s*win\b/, /congratulations?.{0,20}(winner|won|selected)/,
     /claim\s*(your\s*)?(prize|reward|gift|winnings)/, /first\s*\d+\s*(people|users|members)/,
     /who('?s| is)?\s*first/, /\$\d{2,}\s*(usd|giveaway|prize|reward|cash)/, /limited\s*(time|spots?)/,
+    // "wygrales" on its own is ordinary gaming banter, so it only counts when a
+    // prize or a claim instruction follows it.
+    /\brozdanie\b/, /gratulacje.{0,25}(wygral|nagrod|zwyciez|wybran)/,
+    /wygrala?[sz]\b.{0,40}(nagrod|odbierz|kliknij|link|iphone|bitcoin|\d{2,}\s*(zl|pln|usd|euro))/,
+    /odbierz\s*(swoj[aą]?\s*)?(nagrod|prezent|wygran)/, /zwyciezc[aey]\s*(losowania|konkursu)/,
+    /pierwsz\w*\s*\d+\s*(osob|osoby|uzytkownik)/, /ograniczona\s*(liczba|oferta)/,
   ]},
   { name: 'steam', weight: 3, patterns: [
     /steam\s*(gift|community|nitro|trade)/, /stea[mr]n?community/, /steam.{0,10}(login|sign\s*in)/,
     /trade\s*offer/, /free\s*(game|games|skins?|cs\d*\s*skins?)/,
+    /darmowe\s*(skiny|klucze)/, /oferta\s*wymiany/, /zaloguj\s*sie\s*przez\s*steam/,
   ]},
   { name: 'malware-game', weight: 4, patterns: [
-    /(try|test|play|check\s*out)\s*(out\s*)?my\s*(new\s*)?game/, /playtest|beta\s*test/, /game\s*i\s*(made|created|developed)/,
+    /(try|test|play|check\s*out)\s*(out\s*)?my\s*(new\s*)?game/, /game\s*i\s*(made|created|developed)/,
+    // The scam is always an individual pushing their own build, while a server
+    // announcing "our beta testers" is not, so the possessive has to be there.
+    /(playtest|beta\s*test\w*)\s*(for|of|on)?\s*\bmy\b/, /\bmy\s*(game'?s?\s*)?(playtest|beta\s*test)/,
+    /beta\s*test\w*.{0,25}\b(moja|mojej|moje)\b/, /\b(moja|mojej)\s*gr[aey].{0,25}beta/,
     /can\s*you\s*(test|try)\s*(my|this)/, /feedback\s*on\s*my\s*game/, /(download|install).{0,15}(dropbox|drive\.google|mediafire|mega\.nz|\.zip|\.rar|\.exe)/,
     /beta\s*(access|key|invite)/, /help\s*me\s*test/,
+    /(sprawdz|przetestuj|zagraj\s*w)\s*(moja|moje|nowa)\s*(gre|gra|gierk)/,
+    /gr[aey]\s*ktor[aą]\s*(zrobilem|stworzylem|napisalem)/, /pomoz\s*mi\s*(ja\s*)?przetestowac/,
+    /(pobierz|zainstaluj).{0,15}(mega\.nz|mediafire|dysk|\.zip|\.rar|\.exe)/,
   ]},
   { name: 'phishing-login', weight: 4, patterns: [
     /verify\s*your\s*(account|identity)/, /(login|log\s*in|sign\s*in)\s*to\s*(claim|verify|continue)/,
     /you('?ve| have)?\s*been\s*(reported|banned)/, /appeal\s*your\s*(ban|report)/, /account\s*(will\s*be\s*)?(suspended|deleted|terminated)/,
     /discord\s*(staff|team|support|moderation)\b.{0,30}(report|verify|ban|violat)/, /confirm\s*your\s*(email|password|identity)/,
     /scan\s*(the\s*)?qr/, /qr\s*code.{0,15}(claim|verify|login|nitro)/,
+    /zweryfikuj\s*(swoje\s*)?(konto|tozsamosc)/, /twoje\s*konto\s*(zostalo|bedzie)\s*(zablokowane|zbanowane|usuniete|zawieszone)/,
+    /zaloguj\s*sie\s*(aby|zeby)\s*(odebrac|potwierdzic|kontynuowac)/,
+    /potwierdz\s*(swoj|swoje)\s*(email|haslo|dane|tozsamosc)/, /zeskanuj\s*kod\s*qr/,
+    /zostales\s*(zglosz|zbanowan)/, /napisz\s*do\s*(administracji|moderacji)\s*discorda/,
   ]},
   { name: 'adult-bait', weight: 3, patterns: [
     /\bonlyfans\b/, /leaked?\s*(nudes?|content|onlyfans)/, /\bnudes?\b/, /18\s*\+.{0,15}(content|server|leaked)/,
     /teen\s*(porn|leak|content)/, /e-?girl.{0,10}(pics?|nudes?)/, /my\s*(private\s*)?(pics?|content)/,
+    /nagie\s*(zdjecia|fotki)/, /wyciek\w*\s*(zdjecia|nagrania|tresci)/,
+    /moje\s*(prywatne\s*)?(zdjecia|fotki|nagrania)/, /(sexting|erotyczne)\s*(zdjecia|czat)/,
   ]},
   { name: 'job-scam', weight: 3, patterns: [
     /(hiring|remote\s*job|paid\s*job).{0,20}(dm|message|apply)/, /earn\s*\$?\d+.{0,15}(per|daily|weekly|hour)/,
     /work\s*from\s*home.{0,15}\$/, /\bcrypto\s*trader\s*(wanted|needed)/,
+    /praca\s*(zdalna|z\s*domu).{0,20}(napisz|dm|wiadomosc|pw)/, /szybka\s*kasa/,
+    /zarabiaj\s*\d+.{0,15}(zl|pln|dziennie|tygodniowo|godzine)/, /zarob\s*\d+\s*(zl|pln)/,
+    /(szukam|zatrudniam)\s*(osob|ludzi).{0,20}(napisz|dm|pw)/,
   ]},
 ];
 
@@ -167,6 +205,46 @@ function analyze(message, isNew = false, extraText = '') {
 
 function daysBetween(a, b) { return Math.abs(a - b) / 86_400_000; }
 
+/** Webhooks and APP posts are not members. Skipping them is how the Polish raid sat in #propozycje. */
+function isWebhookOrApp(message) {
+  return Boolean(message.webhookId || message.applicationId);
+}
+
+function skipIncoming(message, client) {
+  if (!message.guild) return true;
+  if (client?.user && message.author?.id === client.user.id) return true;
+  if (message.author?.bot && !isWebhookOrApp(message)) return true;
+  return false;
+}
+
+function imageUrlsFrom(message, max = 3) {
+  const urls = [];
+  for (const a of message.attachments?.values?.() || []) {
+    if ((a.contentType || '').startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp)$/i.test(a.name || a.url || '')) {
+      urls.push(a.url);
+    }
+  }
+  for (const e of message.embeds || []) {
+    const u = e.image?.url || e.thumbnail?.url;
+    if (u) urls.push(u);
+  }
+  return [...new Set(urls)].slice(0, max);
+}
+
+async function deleteScamWebhook(message) {
+  if (!message.webhookId) return false;
+  try {
+    const hooks = await message.channel.fetchWebhooks();
+    const hook = hooks.get(message.webhookId);
+    if (!hook) return false;
+    await hook.delete('Anti-scam: this webhook posted scam content');
+    return true;
+  } catch (err) {
+    console.error('[AntiScam] webhook delete failed:', err.message);
+    return false;
+  }
+}
+
 async function postAlert(guild, settings, embed) {
   const chId = settings?.antiScamAlertChannelId || settings?.logChannelId;
   if (!chId) return;
@@ -179,26 +257,25 @@ async function postAlert(guild, settings, embed) {
  */
 async function handleMessage(message, client) {
   try {
-    if (!message.guild || message.author.bot || !message.member) return;
+    if (skipIncoming(message, client)) return;
 
     const settings = client.db.getGuildSettings(message.guild.id);
     if (!settings || settings.antiScamEnabled === false) return;
 
-    // Never touch staff / owner / anyone who can manage messages.
-    const isStaff = hasStaffRole(message.member, settings);
-    const isOwner = settings.ownerRoleId && message.member.roles.cache.has(settings.ownerRoleId);
-    const canMod  = message.member.permissions.has(PermissionFlagsBits.ManageMessages);
+    const webhook = isWebhookOrApp(message);
 
-    if (isStaff || isOwner) return;
-    if (canMod) return;
+    // Never touch staff / owner / anyone with real mod permissions.
+    if (message.member && isStaffMember(message.member, settings)) return;
 
     // How "new" is this member? Use the younger of account age and join age.
+    // Webhooks have no membership — treat them as throwaways so a hit deletes
+    // the post (and the webhook) instead of timing out a fake APP user.
     const newDays      = settings.antiScamNewAccountDays ?? 7;
     const accountAge   = daysBetween(Date.now(), message.author.createdTimestamp);
-    const joinedAge    = message.member.joinedTimestamp
+    const joinedAge    = message.member?.joinedTimestamp
       ? daysBetween(Date.now(), message.member.joinedTimestamp)
       : accountAge;
-    const isNew        = accountAge < newDays || joinedAge < newDays;
+    const isNew        = webhook || accountAge < newDays || joinedAge < newDays;
 
     // First pass — text only.
     let verdict  = analyze(message, isNew);
@@ -207,12 +284,10 @@ async function handleMessage(message, client) {
     // ── OCR pass ────────────────────────────────────────────────────────────
     // If text alone didn't flag it but the message has image(s), read the text
     // out of the images (fake MrBeast tweet / "Withdrawal Successful" screenshots
-    // hide all their scam wording inside the picture).
+    // hide all their scam wording inside the picture). Embeds count too —
+    // webhook/APP posts often put the screenshot in an embed, not an attachment.
     if (!verdict.hit && settings.antiScamOcr !== false) {
-      const imageUrls = [...message.attachments.values()]
-        .filter(a => (a.contentType || '').startsWith('image/') || /\.(png|jpe?g|webp|gif|bmp)$/i.test(a.name || a.url))
-        .slice(0, 3)               // cap at 3 images per message
-        .map(a => a.url);
+      const imageUrls = imageUrlsFrom(message, 3);
 
       if (imageUrls.length) {
         const texts = await Promise.all(imageUrls.map(u => ocr.readImage(u)));
@@ -236,15 +311,33 @@ async function handleMessage(message, client) {
     // Always nuke the message first.
     await message.delete().catch(() => {});
 
+    if (webhook) verdict.reasons.push('webhook/APP post');
+
     const baseEmbed = new EmbedBuilder()
       .setTimestamp()
       .addFields(
         { name: 'User',        value: `${message.author} \`${message.author.tag}\` (${message.author.id})`, inline: false },
-        { name: 'Account age', value: `${accountAge.toFixed(1)} days`, inline: true },
-        { name: 'In server',   value: `${joinedAge.toFixed(1)} days`,  inline: true },
+        { name: 'Account age', value: webhook ? 'webhook / APP' : `${accountAge.toFixed(1)} days`, inline: true },
+        { name: 'In server',   value: webhook ? 'n/a' : `${joinedAge.toFixed(1)} days`,  inline: true },
         { name: 'Signals',     value: verdict.reasons.join(', ') || 'heuristic', inline: false },
         { name: 'Message',     value: `\`\`\`${contentSnippet.replace(/`/g, "'")}\`\`\`` },
       );
+
+    if (webhook) {
+      const killedHook = await deleteScamWebhook(message);
+      client.db.addModLog(message.guild.id, {
+        action: 'AUTO-DELETE (scam webhook)', targetId: message.author.id,
+        moderatorId: client.user.id, reason: verdict.reasons.join(', '),
+      });
+      baseEmbed.setColor('#ff4500')
+        .setTitle('🪝 Scam blocked — webhook / APP post deleted')
+        .setDescription(killedHook
+          ? 'The webhook that posted it was deleted so it cannot keep firing.'
+          : 'Could not delete the webhook (need Manage Webhooks). The post itself is gone.');
+      await postAlert(message.guild, settings, baseEmbed);
+      console.log(`[AntiScam] Deleted webhook/APP post from ${message.author.tag} (${verdict.reasons.join(', ')})`);
+      return;
+    }
 
     if (isNew) {
       // ── New account → strike, then KICK or (at limit) BAN ────────────────
@@ -323,4 +416,4 @@ async function handleMessage(message, client) {
   }
 }
 
-module.exports = { handleMessage, analyze };
+module.exports = { handleMessage, analyze, skipIncoming, isWebhookOrApp, imageUrlsFrom };

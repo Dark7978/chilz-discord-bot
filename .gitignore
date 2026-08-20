@@ -6,10 +6,13 @@ aiSupportData.json
 *.log
 yt-dlp.exe
 yt-dlp
+ffbuild/
 .remember/
 .claude/
 bridge-server.js
 bridge-status.ps1
-eng.traineddata
+*.traineddata
+youtube.cookies.txt
+*.cookies.txt
 .DS_Store
 Thumbs.db

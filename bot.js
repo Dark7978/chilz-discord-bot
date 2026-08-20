@@ -11,6 +11,7 @@ const antiScam   = require('./antiScam');
 const autoMod    = require('./autoMod');
 const banAppeal  = require('./banAppeal');
 const aiSupport  = require('./aiSupport');
+const features   = require('./features');
 const fs        = require('path'), path = require('path');
 const ticketCommand = require('./commands/ticket');
 const { isStaffMember } = require('./staffAccess');
@@ -42,18 +43,35 @@ for (const file of fsLib.readdirSync(commandsPath).filter(f => f.endsWith('.js')
   if (cmd.data && cmd.execute) client.commands.set(cmd.data.name, cmd);
 }
 
+// Commands are registered per guild rather than globally, because a
+// moderation-only server should not even be offered /music or /ticket.
+async function registerGuildCommands(client, guild, payloads) {
+  const settings = client.db.getGuildSettings(guild.id) || client.db.initGuild(guild.id);
+  const allowed  = features.commandsFor(settings, payloads);
+  await guild.commands.set(allowed);
+  console.log(`✓ Registered ${allowed.length} commands in ${guild.name} (${features.profileOf(settings)})`);
+}
+
+async function registerCommands(client) {
+  const payloads = client.commands.map(c => c.data.toJSON());
+  try {
+    // Clear the global set, otherwise every guild keeps seeing all of them.
+    await client.application.commands.set([]);
+    for (const guild of client.guilds.cache.values()) {
+      await registerGuildCommands(client, guild, payloads).catch(err =>
+        console.error(`[Cmd Register] ${guild.id}:`, err.message));
+    }
+  } catch (err) {
+    console.error('[Cmd Register]', err);
+  }
+}
+
 // ── Ready ────────────────────────────────────────────────────────────────────
 client.once('clientReady', async () => {
   console.log(`✓ Bot logged in as ${client.user.tag}`);
   client.user.setActivity('Chilz Support', { type: 3 }); // Watching
 
-  try {
-    const cmds = client.commands.map(c => c.data.toJSON());
-    await client.application.commands.set(cmds);
-    console.log(`✓ Registered ${cmds.length} slash commands`);
-  } catch (err) {
-    console.error('[Cmd Register]', err);
-  }
+  await registerCommands(client);
 
   // Re-arm any AI-support channel mutes that outlived the last restart
   aiSupport.init(client);
@@ -92,6 +110,17 @@ client.on('interactionCreate', async (interaction) => {
 
   // ── Buttons ──────────────────────────────────────────────────────────────────
   if (interaction.isButton()) {
+    // A panel left over from before a server was narrowed to moderation-only
+    // would otherwise still work; ignore those buttons outright.
+    const guildFeatures = client.db.getGuildSettings(interaction.guildId);
+    const needs = interaction.customId.startsWith('music_')  ? 'music'
+                : interaction.customId.startsWith('ai_')     ? 'ai'
+                : /ticket/.test(interaction.customId)        ? 'tickets'
+                : null;
+    if (needs && !features.has(guildFeatures, needs)) {
+      return interaction.reply({ content: 'That feature is turned off in this server.', flags: 64 });
+    }
+
     if (interaction.customId === 'ticket_close_approve' || interaction.customId === 'ticket_close_reject') {
       const settings = client.db.getGuildSettings(interaction.guildId);
       const staff = isStaffMember(interaction.member, settings) || interaction.member.permissions.has('BanMembers');
@@ -155,7 +184,9 @@ client.on('messageCreate', async (message) => {
   antiScam.handleMessage(message, client);
 
   // AI support channel — anti-scam runs first so scams never reach the model
-  aiSupport.handleMessage(message, client);
+  if (features.has(client.db.getGuildSettings(message.guild?.id), 'ai')) {
+    aiSupport.handleMessage(message, client);
+  }
 });
 
 client.on('voiceStateUpdate', async (oldState, newState) => {
@@ -178,9 +209,12 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 });
 
 // ── Guild join ────────────────────────────────────────────────────────────────
-client.on('guildCreate', (guild) => {
+client.on('guildCreate', async (guild) => {
   console.log(`[Join] ${guild.name} (${guild.id})`);
   client.db.initGuild(guild.id);
+  const payloads = client.commands.map(c => c.data.toJSON());
+  await registerGuildCommands(client, guild, payloads)
+    .catch(err => console.error(`[Cmd Register] ${guild.id}:`, err.message));
 });
 
 client.login(process.env.DISCORD_TOKEN);

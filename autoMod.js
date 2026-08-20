@@ -21,8 +21,12 @@ async function createReturnInvite(guild) {
   return null;
 }
 
-function bypass(message, settings) {
-  return message.author.bot || !message.guild || isStaffMember(message.member, settings);
+function bypass(message, settings, client) {
+  if (!message.guild) return true;
+  if (client?.user && message.author?.id === client.user.id) return true;
+  if (message.author?.bot && !message.webhookId && !message.applicationId) return true;
+  if (message.member && isStaffMember(message.member, settings)) return true;
+  return false;
 }
 
 async function notify(message, settings, text) {
@@ -33,6 +37,17 @@ async function notify(message, settings, text) {
 }
 
 async function enforce(message, client, reason) {
+  if (message.webhookId || message.applicationId) {
+    await message.delete().catch(() => {});
+    try {
+      const hooks = await message.channel.fetchWebhooks();
+      const hook = hooks.get(message.webhookId);
+      if (hook) await hook.delete('AutoMod: webhook posted scam or spam');
+    } catch (err) { console.error('[AutoMod] webhook delete failed:', err.message); }
+    const settings = client.db.getGuildSettings(message.guild.id) || {};
+    await notify(message, settings, `🪝 AutoMod removed a webhook / APP post (${reason}).`);
+    return true;
+  }
   const key = `${message.guild.id}:${message.author.id}`;
   if (activeIncidents.has(key)) return true;
   activeIncidents.set(key, Date.now());
@@ -59,7 +74,7 @@ async function enforce(message, client, reason) {
 
 async function handleMessage(message, client) {
   const settings = client.db.getGuildSettings(message.guild?.id);
-  if (bypass(message, settings)) return false;
+  if (bypass(message, settings, client)) return false;
   if (settings?.honeypotChannelId && message.channel.id === settings.honeypotChannelId) return enforce(message, client, 'honeypot bait');
   const now = Date.now(); const prior = (windows.get(message.author.id) || []).filter(t => now - t < BURST_WINDOW_MS); prior.push(now); windows.set(message.author.id, prior);
   if (prior.length >= 6) return enforce(message, client, 'rapid-message spam');
