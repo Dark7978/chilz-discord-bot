@@ -94,4 +94,4 @@ function resetUser(userId) {
   for (const key of activeIncidents.keys()) if (key.endsWith(`:${userId}`)) activeIncidents.delete(key);
 }
 
-module.exports = { handleMessage, init, resetUser, STAFF_ROLE_ID };
+module.exports = { handleMessage, init, resetUser };
