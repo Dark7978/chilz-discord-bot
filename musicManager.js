@@ -184,26 +184,52 @@ function rankCandidates(songs, query, reference) {
     .map(x => x.s);
 }
 
+// Reupload titles carry junk that no music service can match — bracketed notes,
+// bass-boost frequency lists, "official video". Strip it to get back to the song.
+function cleanQuery(text) {
+  return String(text || '')
+    .replace(/\([^)]*\)|\[[^\]]*\]|\{[^}]*\}/g, ' ')
+    .replace(/\b\d+(?:[.,]\d+)*\s*hz\b/gi, ' ')
+    .replace(/\b(re)?bass(ed|boosted)?\b|\bbass ?boost(ed)?\b/gi, ' ')
+    .replace(/\b(official|music)?\s*(video|audio|lyrics?|visualizer|hd|4k|hq)\b/gi, ' ')
+    .replace(/[|/]+/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
 // Deezer's search is free, keyless, and reachable from hosts YouTube blocks. It
 // gives the canonical artist, title and length to score candidates against, so
 // remixes and "full album" uploads stop winning.
 async function referenceTrack(query) {
-  try {
-    const res = await fetch(`https://api.deezer.com/search?limit=1&q=${encodeURIComponent(query)}`);
-    if (!res.ok) return {};
-    const t = (await res.json()).data?.[0];
-    if (!t) return {};
-    return { name: `${t.artist?.name || ''} ${t.title_short || t.title || ''}`.trim(), duration: t.duration || 0 };
-  } catch {
-    return {};
+  for (const attempt of [...new Set([query, cleanQuery(query)])].filter(Boolean)) {
+    try {
+      const res = await fetch(`https://api.deezer.com/search?limit=6&q=${encodeURIComponent(attempt)}`);
+      if (!res.ok) continue;
+      const hits = (await res.json()).data || [];
+      if (!hits.length) continue;
+
+      // Deezer's first hit is often a 12" mix or a tribute. Popularity picks the
+      // original, but only trust a plain title over an obvious alternate cut.
+      const best = hits
+        .map(t => ({ t, score: (t.rank || 0) - (VARIANT_RE.test(t.title || '') ? 1e7 : 0) }))
+        .sort((a, b) => b.score - a.score)[0].t;
+
+      return {
+        name: `${best.artist?.name || ''} ${best.title_short || best.title || ''}`.trim(),
+        // If even Deezer only lists alternate cuts, its length says nothing
+        // about the track being asked for.
+        duration: VARIANT_RE.test(best.title || '') ? 0 : best.duration || 0,
+      };
+    } catch {
+      // try the next phrasing
+    }
   }
+  return {};
 }
 
-async function soundcloudSearch(query, limit = 1, targetSeconds = 0) {
-  const want = Math.min(Math.max(limit * 5, 5), 25);
-  console.log(`[Music] SoundCloud search limit=${limit} query="${query}"`);
+async function scFetch(phrase, want) {
   const args = [
-    `scsearch${want}:${query}`,
+    `scsearch${want}:${phrase}`,
     '--dump-json',
     '--no-playlist',
     '--no-warnings',
@@ -220,9 +246,23 @@ async function soundcloudSearch(query, limit = 1, targetSeconds = 0) {
   }
   const songs = parseYtdlpJson(stdout, 'SoundCloud');
   const full  = songs.filter(s => !s.duration || s.duration >= SC_MIN_SECONDS);
+  return full.length ? full : songs;
+}
+
+async function soundcloudSearch(query, limit = 1, targetSeconds = 0) {
+  const want = Math.min(Math.max(limit * 5, 5), 25);
   const reference = await referenceTrack(query);
   if (targetSeconds) reference.duration = targetSeconds;
-  return rankCandidates(full.length ? full : songs, query, reference);
+
+  // A reupload title ("(37,34,31,28Hz) ... (Rebassed By DJBC)") matches nothing,
+  // so retry with the tidied title and the canonical name before giving up.
+  const phrases = [...new Set([query, cleanQuery(query), reference.name].filter(Boolean))];
+  for (const phrase of phrases) {
+    console.log(`[Music] SoundCloud search limit=${limit} query="${phrase}"`);
+    const songs = await scFetch(phrase, want);
+    if (songs.length) return rankCandidates(songs, query, reference);
+  }
+  return [];
 }
 
 // Attach the runner-up versions so a bad match is one click from being fixed.
@@ -507,7 +547,7 @@ async function search(query, limit = 1) {
     const title = await youtubeTitle(query);
     if (!title) throw new Error('YouTube is blocking this server and the video title could not be read. Try searching by song name.');
     const ranked = await soundcloudSearch(title, 1);
-    if (!ranked.length) throw new Error(`YouTube is blocking this server and no SoundCloud match was found for "${title}".`);
+    if (!ranked.length) throw new Error(`YouTube is blocking this server and nothing matching "${cleanQuery(title) || title}" is on SoundCloud. Try searching by song name.`);
     const [best] = withAlternatives(ranked, 1);
     console.log(`[Music] YouTube link "${title}" → SoundCloud ${best.url}`);
     return [{ ...best, source: 'YouTube → SoundCloud' }];
