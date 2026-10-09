@@ -63,8 +63,8 @@ function isYoutubeTarget(target) {
 function ytdlpFlags(target = '') {
   const args = ['--no-warnings'];
   if (!isYoutubeTarget(target)) return args;
-  args.push('--extractor-args', 'youtube:player_client=web');
-  if (process.platform !== 'win32') args.push('--js-runtimes', 'deno');
+  // Let yt-dlp choose current YouTube clients and solve JS challenges with Node.
+  args.push('--js-runtimes', 'node:' + process.execPath);
   const cookies = cookieFile();
   if (cookies) args.push('--cookies', cookies);
   return args;
